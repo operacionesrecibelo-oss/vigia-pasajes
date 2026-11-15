@@ -18,11 +18,9 @@ from zoneinfo import ZoneInfo
 import re
 import traceback
 
-from fast_flights import FlightQuery, Passengers, create_query, fetch_flights_html
-import json as _json
-
-from fast_flights.model import Airport, CarbonEmission, Flights, SimpleDatetime, SingleFlight
-from fast_flights.parser import LexborHTMLParser, _parse_time
+from fast_flights import FlightQuery, Passengers, create_query
+from fli.models import Airport as FAirport, FlightSearchFilters, FlightSegment, MaxStops, PassengerInfo, SeatType, SortBy
+from fli.search import SearchFlights
 
 TZ = ZoneInfo("America/Santiago")
 STATE_FILE = os.environ.get("STATE_FILE", "state/state.json")
@@ -101,86 +99,59 @@ def tg_enviar(token, chat_id, texto):
     )
 
 
-def parse(html):
-    """Lector propio: Google reparte los vuelos entre 'mejores' (payload[2]) y 'otros' (payload[3])."""
-    script = LexborHTMLParser(html).css_first(r"script.ds\:1").text()
-    data = script.split("data:", 1)[1].rsplit(",", 1)[0]
-    payload = _json.loads(data)
-    resumen = {i: (type(payload[i]).__name__, len(payload[i]) if isinstance(payload[i], list) else None)
-               for i in range(min(len(payload), 8))}
-    vuelos, vistos = [], set()
-    for idx in (2, 3):
-        bloque_ = payload[idx] if len(payload) > idx else None
-        if not bloque_ or not isinstance(bloque_, list) or not bloque_[0]:
-            continue
-        for k in bloque_[0]:
-            try:
-                flight, price = k[0], k[1][0][1]
-                segs = []
-                for sf in flight[2]:
-                    segs.append(SingleFlight(
-                        from_airport=Airport(code=sf[3], name=sf[4]),
-                        to_airport=Airport(code=sf[6], name=sf[5]),
-                        departure=SimpleDatetime(date=tuple(sf[20]), time=_parse_time(sf[8])),
-                        arrival=SimpleDatetime(date=tuple(sf[21]), time=_parse_time(sf[10])),
-                        duration=sf[11], plane_type=sf[17]))
-                clave = (price, tuple((x.from_airport.code, x.departure.time) for x in segs))
-                if clave in vistos:
-                    continue
-                vistos.add(clave)
-                vuelos.append(Flights(type=flight[0], price=price, airlines=flight[1],
-                                      flights=segs, carbon=CarbonEmission(0, 0)))
-            except (TypeError, IndexError):
-                continue
-    if not vuelos:
-        log(f"Estructura sin vuelos: {resumen}")
-    return vuelos
-
 
 # ---------- búsqueda ----------
 
+def nombres_aerolineas(f):
+    vistos = []
+    for leg in f.legs:
+        n = leg.airline.value
+        if n not in vistos:
+            vistos.append(n)
+    return vistos
+
+
 def aerolinea_ok(f, permitidas):
-    nombres = " ".join(f.airlines).lower().replace(" ", "")
+    nombres = " ".join(nombres_aerolineas(f)).lower().replace(" ", "")
     return any(a.lower().replace(" ", "") in nombres for a in permitidas)
 
 
 def escalas_ok(f):
     # Directo, o todas las escalas dentro de Colombia
-    escalas = [s.to_airport.code for s in f.flights[:-1]]
+    escalas = [leg.arrival_airport.name for leg in f.legs[:-1]]
     return all(e in AEROPUERTOS_COL for e in escalas)
 
 
 def describir(f):
-    s0, s1 = f.flights[0], f.flights[-1]
-    hh = lambda t: f"{t[0]:02d}:{t[1]:02d}"
-    ruta = " → ".join([s0.from_airport.code] + [s.to_airport.code for s in f.flights])
-    escalas = "directo" if len(f.flights) == 1 else f"{len(f.flights) - 1} escala"
-    return (f"{', '.join(f.airlines)} · {ruta} · {escalas} · "
-            f"sale {hh(s0.departure.time)} llega {hh(s1.arrival.time)}")
+    l0, l1 = f.legs[0], f.legs[-1]
+    ruta = " → ".join([l0.departure_airport.name] + [l.arrival_airport.name for l in f.legs])
+    escalas = "directo" if len(f.legs) == 1 else f"{len(f.legs) - 1} escala"
+    return (f"{', '.join(nombres_aerolineas(f))} · {ruta} · {escalas} · "
+            f"sale {l0.departure_datetime:%H:%M} llega {l1.arrival_datetime:%H:%M}")
 
 
 def buscar_tramo(cfg, fecha, desde, hasta):
+    # Enlace para abrir la misma búsqueda en Google Flights
     q = create_query(
-        flights=[FlightQuery(date=fecha, from_airport=desde, to_airport=hasta,
-                             max_stops=1)],
-        trip="one-way",
-        seat="economy",
+        flights=[FlightQuery(date=fecha, from_airport=desde, to_airport=hasta)],
+        trip="one-way", seat="economy",
         passengers=Passengers(adults=cfg["adultos"], children=cfg["ninos"]),
-        language="es",
-        currency="CLP",
+        language="es", currency="CLP",
     )
-    html = fetch_flights_html(q)
-    try:
-        res = parse(html)
-    except Exception:
-        titulo = re.search(r"<title>(.*?)</title>", html, re.S)
-        log(f"HTML recibido: {len(html)} bytes, title={titulo.group(1)[:60] if titulo else None}, "
-            f"ds1={'ds:1' in html}, consent={'consent' in html.lower()}")
-        log("Detalle: " + traceback.format_exc().strip().splitlines()[-3].strip())
-        raise
-    log(f"Tramo {'ida' if desde == cfg['origen'] else 'vuelta'}: {len(res)} resultados")
-    validos = [f for f in res if f.price and aerolinea_ok(f, cfg["aerolineas"])
-               and escalas_ok(f)]
+    filtros = FlightSearchFilters(
+        passenger_info=PassengerInfo(adults=cfg["adultos"], children=cfg["ninos"]),
+        flight_segments=[FlightSegment(
+            departure_airport=[[getattr(FAirport, desde), 0]],
+            arrival_airport=[[getattr(FAirport, hasta), 0]],
+            travel_date=fecha)],
+        stops=MaxStops.ONE_STOP_OR_FEWER,
+        seat_type=SeatType.ECONOMY,
+        sort_by=SortBy.CHEAPEST,
+    )
+    res = SearchFlights().search(filtros, currency="CLP", language="es", country="CL") or []
+    validos = [f for f in res if f.price and aerolinea_ok(f, cfg["aerolineas"]) and escalas_ok(f)]
+    tramo = "ida" if desde == cfg["origen"] else "vuelta"
+    log(f"Tramo {tramo}: {len(res)} resultados, {len(validos)} cumplen filtros")
     validos.sort(key=lambda f: f.price)
     return (validos[0] if validos else None), q.url()
 
