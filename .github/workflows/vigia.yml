@@ -1,0 +1,58 @@
+name: Vigia de pasajes
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: vigia
+  cancel-in-progress: false
+
+jobs:
+  revisar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Recuperar estado
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: estado-${{ github.run_id }}
+          restore-keys: estado-
+
+      - name: Revisar precios
+        id: revisar
+        env:
+          CONFIG_VIAJE: ${{ secrets.CONFIG_VIAJE }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python vigia.py | tee salida.txt
+          if grep -q FINALIZADO salida.txt; then echo "fin=1" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Guardar estado
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: estado-${{ github.run_id }}
+
+      - name: Apagar al terminar el periodo
+        if: steps.revisar.outputs.fin == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow disable vigia.yml --repo "${{ github.repository }}"

@@ -1,0 +1,4 @@
+state/
+__pycache__/
+salida.txt
+config_viaje.json
