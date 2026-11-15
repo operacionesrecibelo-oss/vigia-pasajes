@@ -19,7 +19,10 @@ import re
 import traceback
 
 from fast_flights import FlightQuery, Passengers, create_query, fetch_flights_html
-from fast_flights.parser import parse
+import json as _json
+
+from fast_flights.model import Airport, CarbonEmission, Flights, SimpleDatetime, SingleFlight
+from fast_flights.parser import LexborHTMLParser, _parse_time
 
 TZ = ZoneInfo("America/Santiago")
 STATE_FILE = os.environ.get("STATE_FILE", "state/state.json")
@@ -96,6 +99,42 @@ def tg_enviar(token, chat_id, texto):
         {"chat_id": chat_id, "text": texto, "parse_mode": "HTML",
          "disable_web_page_preview": "true"},
     )
+
+
+def parse(html):
+    """Lector propio: Google reparte los vuelos entre 'mejores' (payload[2]) y 'otros' (payload[3])."""
+    script = LexborHTMLParser(html).css_first(r"script.ds\:1").text()
+    data = script.split("data:", 1)[1].rsplit(",", 1)[0]
+    payload = _json.loads(data)
+    resumen = {i: (type(payload[i]).__name__, len(payload[i]) if isinstance(payload[i], list) else None)
+               for i in range(min(len(payload), 8))}
+    vuelos, vistos = [], set()
+    for idx in (2, 3):
+        bloque_ = payload[idx] if len(payload) > idx else None
+        if not bloque_ or not isinstance(bloque_, list) or not bloque_[0]:
+            continue
+        for k in bloque_[0]:
+            try:
+                flight, price = k[0], k[1][0][1]
+                segs = []
+                for sf in flight[2]:
+                    segs.append(SingleFlight(
+                        from_airport=Airport(code=sf[3], name=sf[4]),
+                        to_airport=Airport(code=sf[6], name=sf[5]),
+                        departure=SimpleDatetime(date=tuple(sf[20]), time=_parse_time(sf[8])),
+                        arrival=SimpleDatetime(date=tuple(sf[21]), time=_parse_time(sf[10])),
+                        duration=sf[11], plane_type=sf[17]))
+                clave = (price, tuple((x.from_airport.code, x.departure.time) for x in segs))
+                if clave in vistos:
+                    continue
+                vistos.add(clave)
+                vuelos.append(Flights(type=flight[0], price=price, airlines=flight[1],
+                                      flights=segs, carbon=CarbonEmission(0, 0)))
+            except (TypeError, IndexError):
+                continue
+    if not vuelos:
+        log(f"Estructura sin vuelos: {resumen}")
+    return vuelos
 
 
 # ---------- búsqueda ----------
