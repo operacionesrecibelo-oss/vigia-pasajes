@@ -1,10 +1,12 @@
 """Vigía de pasajes SCL <-> BOG.
 
-Corre en GitHub Actions cada 15 min. Busca en Google Flights (fast-flights),
-filtra por aerolíneas y escalas, y avisa por Telegram solo cuando el precio baja.
+Corre en GitHub Actions cada 15 min. Busca en Google Flights y, cada 1 hora,
+directo en jetsmart.com. Compara todo por persona (ida + vuelta) y avisa por
+Telegram solo cuando el precio baja.
 No imprime precios ni ruta en los logs (el repositorio es público).
 """
 
+import html
 import json
 import os
 import sys
@@ -15,8 +17,7 @@ import urllib.request
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-import re
-import traceback
+import jetsmart
 
 from fast_flights import FlightQuery, Passengers, create_query
 from fli.models import Airport as FAirport, FlightSearchFilters, FlightSegment, MaxStops, PassengerInfo, SeatType, SortBy
@@ -186,22 +187,74 @@ def buscar_tramo(cfg, fecha, desde, hasta):
     return (validos[0] if validos else None), q.url()
 
 
-def mejor_combinacion(cfg):
-    ida, url_ida = buscar_tramo(cfg, cfg["ida"], cfg["origen"], cfg["destino"])
+def candidato_google(f, url, pax):
+    return {"pp": f.price / pax, "fuente": "Google Flights", "desc": describir(f),
+            "url": url, "link_txt": "Ver en Google Flights"}
+
+
+def candidatos_jetsmart(cfg, st, fecha, desde, hasta):
+    """Mejor opción de la web de JetSMART para esa fecha (desde la última revisión directa)."""
+    js = st.get("jetsmart") or {}
+    try:
+        edad = (datetime.now(TZ) - datetime.fromisoformat(js["ts"])).total_seconds()
+    except Exception:
+        return None
+    if edad > 3 * 3600:
+        return None
+    ops = [o for o in js.get("tramos", {}).get(fecha, []) if o["escala_colombia"] and o["tasas_incluidas"]]
+    if not ops:
+        return None
+    o = min(ops, key=lambda x: x["pp"])
+    escala = "directo" if o["directo"] else "1 escala (Colombia)"
+    desc = (f"JetSMART · {desde} → {hasta} · {escala} · sale {o['sale']} llega {o['llega']}"
+            f"{' (+1)' if o['dia_siguiente'] else ''}")
+    if o.get("club_pp") and o["club_pp"] < o["pp"]:
+        desc += f"\n💳 Con Club de descuentos: {clp(o['club_pp'])} por persona"
+    return {"pp": o["pp"], "fuente": "web JetSMART", "desc": desc,
+            "url": jetsmart.url_busqueda(cfg, fecha, desde, hasta), "link_txt": "Ver en jetsmart.com"}
+
+
+def mejor_tramo(cfg, st, fecha, desde, hasta, pax):
+    g, url = buscar_tramo(cfg, fecha, desde, hasta)
+    cands = []
+    if g:
+        cands.append(candidato_google(g, url, pax))
+    j = candidatos_jetsmart(cfg, st, fecha, desde, hasta)
+    if j:
+        cands.append(j)
+    return min(cands, key=lambda c: c["pp"]) if cands else None
+
+
+def mejor_combinacion(cfg, st):
+    pax = cfg["adultos"] + cfg["ninos"]
+    ida = mejor_tramo(cfg, st, cfg["ida"], cfg["origen"], cfg["destino"], pax)
     time.sleep(3)
     opciones = []
     for fv in cfg["vueltas"]:
-        vuelta, url_v = buscar_tramo(cfg, fv, cfg["destino"], cfg["origen"])
+        vuelta = mejor_tramo(cfg, st, fv, cfg["destino"], cfg["origen"], pax)
         if ida and vuelta:
-            opciones.append({
-                "total": ida.price + vuelta.price,
-                "fecha_vuelta": fv,
-                "ida": describir(ida), "ida_precio": ida.price, "url_ida": url_ida,
-                "vuelta": describir(vuelta), "vuelta_precio": vuelta.price,
-                "url_vuelta": url_v,
-            })
+            opciones.append({"pp": ida["pp"] + vuelta["pp"], "fecha_vuelta": fv,
+                             "ida": ida, "vuelta": vuelta})
         time.sleep(3)
-    return min(opciones, key=lambda o: o["total"]) if opciones else None, opciones
+    return min(opciones, key=lambda o: o["pp"]) if opciones else None, opciones
+
+
+def revisar_jetsmart(cfg, st, token, chat):
+    tramos = [(cfg["ida"], cfg["origen"], cfg["destino"])] + \
+             [(fv, cfg["destino"], cfg["origen"]) for fv in cfg["vueltas"]]
+    try:
+        res = jetsmart.buscar(cfg, tramos)
+        st["jetsmart"] = {"ts": datetime.now(TZ).isoformat(), "tramos": res}
+        log("JetSMART directo: " + ", ".join(f"{len(v)} opciones" for v in res.values()))
+        if st.get("js_err", 0) >= 3:
+            tg_enviar(token, chat, "✅ La revisión directa en jetsmart.com volvió a funcionar.")
+        st["js_err"] = 0
+    except Exception as e:
+        st["js_err"] = st.get("js_err", 0) + 1
+        log(f"JetSMART directo falló ({type(e).__name__}); consecutivos: {st['js_err']}")
+        if st["js_err"] == 3:
+            tg_enviar(token, chat, "⚠️ jetsmart.com está bloqueando la revisión directa. "
+                      "Sigo revisando con Google Flights y vuelvo a intentar cada hora.")
 
 
 def tipo_cambio():
@@ -219,16 +272,19 @@ def fecha_txt(iso):
     return f"{d.day:02d} {meses[d.month - 1]} {d.year}"
 
 
+def tramo_txt(icono, titulo, c):
+    return (f"{icono} {titulo}: <b>{clp(c['pp'])}</b> por persona · {c['fuente']}\n{c['desc']}\n"
+            f"<a href=\"{html.escape(c['url'])}\">{c['link_txt']}</a>")
+
+
 def bloque(o, cfg, rate):
     pax = cfg["adultos"] + cfg["ninos"]
-    pp = o["total"] / pax
+    total = o["pp"] * pax
     return (
-        f"<b>Total {pax} pasajeros: {clp(o['total'])}</b> ({usd(o['total'], rate)})\n"
-        f"Por persona: {clp(pp)} ({usd(pp, rate)})\n\n"
-        f"🛫 Ida {fecha_txt(cfg['ida'])}: {clp(o['ida_precio'])}\n{o['ida']}\n"
-        f"<a href=\"{o['url_ida']}\">Ver ida en Google Flights</a>\n\n"
-        f"🛬 Vuelta {fecha_txt(o['fecha_vuelta'])}: {clp(o['vuelta_precio'])}\n{o['vuelta']}\n"
-        f"<a href=\"{o['url_vuelta']}\">Ver vuelta en Google Flights</a>"
+        f"<b>Ida + vuelta: {clp(o['pp'])} por persona</b> ({usd(o['pp'], rate)})\n"
+        f"Total {pax} pasajeros: {clp(total)} ({usd(total, rate)})\n\n"
+        + tramo_txt("🛫", f"Ida {fecha_txt(cfg['ida'])}", o["ida"]) + "\n\n"
+        + tramo_txt("🛬", f"Vuelta {fecha_txt(o['fecha_vuelta'])}", o["vuelta"])
     )
 
 
@@ -261,8 +317,11 @@ def main():
         print("FINALIZADO")
         return 0
 
+    if os.environ.get("JETSMART_DUE") == "1":
+        revisar_jetsmart(cfg, st, token, chat)
+
     try:
-        mejor, todas = mejor_combinacion(cfg)
+        mejor, todas = mejor_combinacion(cfg, st)
     except Exception as e:
         st["errores"] = st.get("errores", 0) + 1
         log(f"Error de búsqueda ({type(e).__name__}: {str(e)[:150]}); consecutivos: {st['errores']}")
@@ -279,32 +338,34 @@ def main():
         return 0
 
     rate = tipo_cambio()
-    pax = cfg["adultos"] + cfg["ninos"]
-    pp = mejor["total"] / pax
+    pp = mejor["pp"]
     umbral = cfg["umbral_por_persona_clp"]
-    previo = st.get("ultimo_total")
+    maximo = f"Máximo: {clp(umbral)} por persona (ida + vuelta)"
+    previo = st.get("ultimo_pp")
 
     # Aviso solo si baja respecto de la última revisión
-    if previo is not None and mejor["total"] < previo:
-        baja = previo - mejor["total"]
-        titulo = ("🔥 <b>¡BAJO TU META!</b>" if pp < umbral else "📉 <b>Bajó el precio</b>")
-        tg_enviar(token, chat,
-                  f"{titulo} (−{clp(baja)})\n"
-                  f"Meta: {clp(umbral)} por persona\n\n{bloque(mejor, cfg, rate)}")
-    elif previo is None and pp < umbral:
-        tg_enviar(token, chat, f"🔥 <b>¡Ya está bajo tu meta!</b>\n\n{bloque(mejor, cfg, rate)}")
+    if previo is not None and pp < previo:
+        baja = previo - pp
+        titulo = ("🔥 <b>¡BAJO TU MÁXIMO!</b>" if pp <= umbral else "📉 <b>Bajó el precio</b>")
+        tg_enviar(token, chat, f"{titulo} (−{clp(baja)} por persona)\n{maximo}\n\n{bloque(mejor, cfg, rate)}")
+    elif previo is None and pp <= umbral:
+        tg_enviar(token, chat, f"🔥 <b>¡Ya está bajo tu máximo!</b>\n{maximo}\n\n{bloque(mejor, cfg, rate)}")
 
-    st["ultimo_total"] = mejor["total"]
-    st["minimo"] = min(st.get("minimo", mejor["total"]), mejor["total"])
+    st["ultimo_pp"] = pp
+    st["minimo_pp"] = min(st.get("minimo_pp", pp), pp)
 
     # Resumen diario
-    if ahora.hour >= cfg.get("resumen_hora", 9) and st.get("ultimo_resumen") != hoy:
+    forzar = not st.get("formato_v2")  # enviar un resumen con el formato nuevo al actualizar
+    if forzar or (ahora.hour >= cfg.get("resumen_hora", 9) and st.get("ultimo_resumen") != hoy):
+        st["formato_v2"] = True
         otras = "\n".join(
-            f"• Vuelta {fecha_txt(o['fecha_vuelta'])}: {clp(o['total'])} total"
-            for o in sorted(todas, key=lambda o: o["total"]))
+            f"• Vuelta {fecha_txt(o['fecha_vuelta'])}: {clp(o['pp'])} por persona"
+            for o in sorted(todas, key=lambda o: o["pp"]))
+        falta = pp - umbral
+        estado = "✅ Bajo tu máximo" if falta <= 0 else f"Faltan {clp(falta)} por persona para tu máximo"
         tg_enviar(token, chat,
-                  f"☀️ <b>Resumen diario</b> · Meta {clp(umbral)} por persona\n"
-                  f"Mínimo visto: {clp(st['minimo'])} total\n\n"
+                  f"☀️ <b>Resumen diario</b>\n{maximo}\n{estado}\n"
+                  f"Mínimo visto: {clp(st['minimo_pp'])} por persona\n\n"
                   f"{bloque(mejor, cfg, rate)}\n\n<b>Comparación por fecha de vuelta</b>\n{otras}")
         st["ultimo_resumen"] = hoy
 
