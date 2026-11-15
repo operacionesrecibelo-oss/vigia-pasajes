@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import date, datetime
@@ -77,8 +78,11 @@ def tg_chat_id(token, st):
             if msg:
                 st["chat_id"] = str(msg["chat"]["id"])
                 return st["chat_id"]
-    except Exception:
-        pass
+        log(f"getUpdates OK, {len(upd.get('result', []))} mensajes recibidos")
+    except urllib.error.HTTPError as e:
+        log(f"Telegram rechazó el token (HTTP {e.code}). Revisa el secreto TELEGRAM_TOKEN.")
+    except Exception as e:
+        log(f"Error consultando Telegram: {type(e).__name__}")
     return None
 
 
@@ -180,7 +184,7 @@ def bloque(o, cfg, rate):
 
 def main():
     cfg = json.loads(os.environ["CONFIG_VIAJE"])
-    token = os.environ["TELEGRAM_TOKEN"]
+    token = os.environ["TELEGRAM_TOKEN"].strip()
     st = cargar_estado()
     ahora = datetime.now(TZ)
     hoy = ahora.date().isoformat()
