@@ -21,6 +21,10 @@ import traceback
 from fast_flights import FlightQuery, Passengers, create_query
 from fli.models import Airport as FAirport, FlightSearchFilters, FlightSegment, MaxStops, PassengerInfo, SeatType, SortBy
 from fli.search import SearchFlights
+from fli.search._decoders import parse_flight_row
+from fli.search._urls import with_locale_params
+from fli.search._wire import iter_wrb_chunks
+from fli.search.client import get_client
 
 TZ = ZoneInfo("America/Santiago")
 STATE_FILE = os.environ.get("STATE_FILE", "state/state.json")
@@ -130,6 +134,32 @@ def describir(f):
             f"sale {l0.departure_datetime:%H:%M} llega {l1.arrival_datetime:%H:%M}")
 
 
+def buscar_todos(filtros):
+    """Llama a GetShoppingResults y lee TODOS los bloques de la respuesta."""
+    url = with_locale_params(SearchFlights.BASE_URL, "CLP", "es", "CL")
+    r = get_client().post(url=url, data=f"f.req={filtros.encode()}",
+                          impersonate="chrome", allow_redirects=True)
+    r.raise_for_status()
+    vuelos, vistos, n_bloques = [], set(), 0
+    for inner in iter_wrb_chunks(r.text):
+        n_bloques += 1
+        if not isinstance(inner, list):
+            continue
+        for i in (2, 3):
+            if len(inner) > i and isinstance(inner[i], list) and inner[i] and inner[i][0]:
+                for row in inner[i][0]:
+                    try:
+                        f = parse_flight_row(row)
+                    except Exception:
+                        continue
+                    clave = (f.price, tuple((l.flight_number, l.departure_datetime) for l in f.legs))
+                    if clave not in vistos:
+                        vistos.add(clave)
+                        vuelos.append(f)
+    log(f"Respuesta: {n_bloques} bloques")
+    return vuelos
+
+
 def buscar_tramo(cfg, fecha, desde, hasta):
     # Enlace para abrir la misma búsqueda en Google Flights
     q = create_query(
@@ -148,7 +178,7 @@ def buscar_tramo(cfg, fecha, desde, hasta):
         seat_type=SeatType.ECONOMY,
         sort_by=SortBy.CHEAPEST,
     )
-    res = SearchFlights().search(filtros, currency="CLP", language="es", country="CL") or []
+    res = buscar_todos(filtros)
     validos = [f for f in res if f.price and aerolinea_ok(f, cfg["aerolineas"]) and escalas_ok(f)]
     tramo = "ida" if desde == cfg["origen"] else "vuelta"
     log(f"Tramo {tramo}: {len(res)} resultados, {len(validos)} cumplen filtros")
