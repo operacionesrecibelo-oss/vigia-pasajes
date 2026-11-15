@@ -1,5 +1,7 @@
 name: Vigia de pasajes
 
+# Una ejecución dura ~5 h 40 min revisando cada 15 minutos y, al terminar,
+# lanza la siguiente (workflow_dispatch). El cron queda como respaldo por si la cadena se corta.
 on:
   schedule:
     - cron: "*/15 * * * *"
@@ -18,7 +20,7 @@ concurrency:
 jobs:
   revisar:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
 
@@ -29,24 +31,13 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - name: ¿Toca revisar jetsmart.com? (1 vez por hora)
-        id: js
-        run: |
-          if [ "${{ github.event_name }}" != "schedule" ] || [ "$(date +%-M)" -lt 15 ]; then
-            echo "due=1" >> "$GITHUB_OUTPUT"
-          else
-            echo "due=0" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Cache del navegador
-        if: steps.js.outputs.due == '1'
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ hashFiles('requirements.txt') }}
 
       - name: Instalar navegador
-        if: steps.js.outputs.due == '1'
         run: python -m playwright install --with-deps chromium
 
       - name: Recuperar estado
@@ -56,18 +47,31 @@ jobs:
           key: estado-${{ github.run_id }}
           restore-keys: estado-
 
-      - name: Revisar precios
+      - name: Revisar precios cada 15 minutos
         id: revisar
+        shell: bash
         env:
           CONFIG_VIAJE: ${{ secrets.CONFIG_VIAJE }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          JETSMART_DUE: ${{ steps.js.outputs.due }}
-        shell: bash
         run: |
-          set -o pipefail
-          python vigia.py | tee salida.txt
-          if grep -q FINALIZADO salida.txt; then echo "fin=1" >> "$GITHUB_OUTPUT"; fi
+          fin=$((SECONDS + 340*60))
+          ultimo_js=-99999
+          while [ $SECONDS -lt $fin ]; do
+            inicio=$SECONDS
+            if [ $((SECONDS - ultimo_js)) -ge 3540 ]; then
+              export JETSMART_DUE=1; ultimo_js=$SECONDS
+            else
+              export JETSMART_DUE=0
+            fi
+            python vigia.py > salida.txt 2>&1 || true
+            cat salida.txt
+            if grep -q FINALIZADO salida.txt; then echo "fin=1" >> "$GITHUB_OUTPUT"; break; fi
+            espera=$((900 - (SECONDS - inicio)))
+            if [ $espera -lt 0 ]; then espera=0; fi
+            if [ $((SECONDS + espera)) -ge $fin ]; then break; fi
+            sleep $espera
+          done
 
       - name: Guardar estado
         if: always()
@@ -75,6 +79,12 @@ jobs:
         with:
           path: state
           key: estado-${{ github.run_id }}
+
+      - name: Lanzar la siguiente ronda
+        if: always() && steps.revisar.outputs.fin != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run vigia.yml --repo "${{ github.repository }}" --ref main
 
       - name: Apagar al terminar el periodo
         if: steps.revisar.outputs.fin == '1'
