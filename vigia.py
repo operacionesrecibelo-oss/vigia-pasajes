@@ -223,8 +223,16 @@ def candidatos_jetsmart(cfg, st, fecha, desde, hasta):
 def mejor_tramo(cfg, st, fecha, desde, hasta, pax):
     g, url = buscar_tramo(cfg, fecha, desde, hasta)
     cands = []
+    cache = st.setdefault("g_cache", {})
     if g:
-        cands.append(candidato_google(g, url, pax))
+        c = candidato_google(g, url, pax)
+        cache[fecha] = {"ts": datetime.now(TZ).isoformat(), "cand": c}
+        cands.append(c)
+    elif fecha in cache:
+        edad = (datetime.now(TZ) - datetime.fromisoformat(cache[fecha]["ts"])).total_seconds()
+        if edad < 3600:
+            log("Uso el último resultado de Google para este tramo")
+            cands.append(cache[fecha]["cand"])
     j = candidatos_jetsmart(cfg, st, fecha, desde, hasta)
     if j:
         cands.append(j)
