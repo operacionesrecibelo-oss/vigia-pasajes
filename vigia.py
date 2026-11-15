@@ -135,12 +135,18 @@ def describir(f):
             f"sale {l0.departure_datetime:%H:%M} llega {l1.arrival_datetime:%H:%M}")
 
 
-def buscar_todos(filtros):
+def buscar_todos(filtros, intento=1):
     """Llama a GetShoppingResults y lee TODOS los bloques de la respuesta."""
     url = with_locale_params(SearchFlights.BASE_URL, "CLP", "es", "CL")
     r = get_client().post(url=url, data=f"f.req={filtros.encode()}",
                           impersonate="chrome", allow_redirects=True)
     r.raise_for_status()
+    if not list(iter_wrb_chunks(r.text)):
+        log(f"Google respondió sin datos (HTTP {r.status_code}, {len(r.text)} bytes, "
+            f"inicio={r.text[:60]!r}); intento {intento}")
+        if intento < 3:
+            time.sleep(8 * intento)
+            return buscar_todos(filtros, intento + 1)
     vuelos, vistos, n_bloques = [], set(), 0
     for inner in iter_wrb_chunks(r.text):
         n_bloques += 1
