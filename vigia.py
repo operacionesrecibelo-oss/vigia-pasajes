@@ -123,6 +123,7 @@ def buscar_tramo(cfg, fecha, desde, hasta):
         currency="CLP",
     )
     res = get_flights(q)
+    log(f"Tramo {'ida' if desde == cfg['origen'] else 'vuelta'}: {len(res)} resultados")
     validos = [f for f in res if f.price and aerolinea_ok(f, cfg["aerolineas"])
                and escalas_ok(f)]
     validos.sort(key=lambda f: f.price)
@@ -208,7 +209,7 @@ def main():
         mejor, todas = mejor_combinacion(cfg)
     except Exception as e:
         st["errores"] = st.get("errores", 0) + 1
-        log(f"Error de búsqueda ({type(e).__name__}); consecutivos: {st['errores']}")
+        log(f"Error de búsqueda ({type(e).__name__}: {str(e)[:150]}); consecutivos: {st['errores']}")
         if st["errores"] == 12:  # ~3 horas fallando
             tg_enviar(token, chat, "⚠️ Llevo 3 horas sin poder consultar Google Flights. "
                       "Sigo intentando; si persiste, hay que revisar el script.")
@@ -217,7 +218,7 @@ def main():
     st["errores"] = 0
 
     if not mejor:
-        log("Sin opciones que cumplan los filtros.")
+        log(f"Sin opciones que cumplan los filtros ({len(todas)} combinaciones).")
         guardar_estado(st)
         return 0
 

@@ -40,7 +40,9 @@ jobs:
           CONFIG_VIAJE: ${{ secrets.CONFIG_VIAJE }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        shell: bash
         run: |
+          set -o pipefail
           python vigia.py | tee salida.txt
           if grep -q FINALIZADO salida.txt; then echo "fin=1" >> "$GITHUB_OUTPUT"; fi
 
