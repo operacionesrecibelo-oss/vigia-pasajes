@@ -15,7 +15,11 @@ import urllib.request
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from fast_flights import FlightQuery, Passengers, create_query, get_flights
+import re
+import traceback
+
+from fast_flights import FlightQuery, Passengers, create_query, fetch_flights_html
+from fast_flights.parser import parse
 
 TZ = ZoneInfo("America/Santiago")
 STATE_FILE = os.environ.get("STATE_FILE", "state/state.json")
@@ -126,7 +130,15 @@ def buscar_tramo(cfg, fecha, desde, hasta):
         language="es",
         currency="CLP",
     )
-    res = get_flights(q)
+    html = fetch_flights_html(q)
+    try:
+        res = parse(html)
+    except Exception:
+        titulo = re.search(r"<title>(.*?)</title>", html, re.S)
+        log(f"HTML recibido: {len(html)} bytes, title={titulo.group(1)[:60] if titulo else None}, "
+            f"ds1={'ds:1' in html}, consent={'consent' in html.lower()}")
+        log("Detalle: " + traceback.format_exc().strip().splitlines()[-3].strip())
+        raise
     log(f"Tramo {'ida' if desde == cfg['origen'] else 'vuelta'}: {len(res)} resultados")
     validos = [f for f in res if f.price and aerolinea_ok(f, cfg["aerolineas"])
                and escalas_ok(f)]
