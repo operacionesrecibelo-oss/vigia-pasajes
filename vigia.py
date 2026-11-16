@@ -17,6 +17,7 @@ import urllib.request
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
+import google_web
 import jetsmart
 
 from fast_flights import FlightQuery, Passengers, create_query
@@ -97,6 +98,9 @@ def tg_chat_id(token, st):
 
 
 def tg_enviar(token, chat_id, texto):
+    if os.environ.get("DRY_RUN") == "1":
+        log("[prueba] mensaje no enviado: " + texto.splitlines()[0][:60])
+        return
     http_json(
         f"https://api.telegram.org/bot{token}/sendMessage",
         {"chat_id": chat_id, "text": texto, "parse_mode": "HTML",
@@ -167,14 +171,43 @@ def buscar_todos(filtros, intento=1):
     return vuelos
 
 
-def buscar_tramo(cfg, fecha, desde, hasta):
-    # Enlace para abrir la misma búsqueda en Google Flights
+def url_google(cfg, fecha, desde, hasta):
     q = create_query(
         flights=[FlightQuery(date=fecha, from_airport=desde, to_airport=hasta)],
         trip="one-way", seat="economy",
         passengers=Passengers(adults=cfg["adultos"], children=cfg["ninos"]),
         language="es", currency="CLP",
     )
+    return q.url()
+
+
+WEB = {}  # resultados de Google Flights obtenidos con navegador real en esta revisión
+
+
+def precargar_google_web(cfg):
+    tramos = [(cfg["ida"], cfg["origen"], cfg["destino"])] + \
+             [(fv, cfg["destino"], cfg["origen"]) for fv in cfg["vueltas"]]
+    try:
+        WEB.update(google_web.buscar({f: url_google(cfg, f, d, h) for f, d, h in tramos}))
+        log("Google (navegador): " + ", ".join(f"{len(v)} vuelos" for v in WEB.values()))
+    except Exception as e:
+        log(f"Google (navegador) falló: {type(e).__name__}: {str(e)[:120]}")
+
+
+def buscar_tramo(cfg, fecha, desde, hasta):
+    url = url_google(cfg, fecha, desde, hasta)
+    if WEB.get(fecha):
+        res = WEB[fecha]
+    else:
+        res = buscar_api(cfg, fecha, desde, hasta)
+    validos = [f for f in res if f.price and aerolinea_ok(f, cfg["aerolineas"]) and escalas_ok(f)]
+    tramo = "ida" if desde == cfg["origen"] else "vuelta"
+    log(f"Tramo {tramo}: {len(res)} resultados, {len(validos)} cumplen filtros")
+    validos.sort(key=lambda f: f.price)
+    return (validos[0] if validos else None), url
+
+
+def buscar_api(cfg, fecha, desde, hasta):
     filtros = FlightSearchFilters(
         passenger_info=PassengerInfo(adults=cfg["adultos"], children=cfg["ninos"]),
         flight_segments=[FlightSegment(
@@ -185,12 +218,7 @@ def buscar_tramo(cfg, fecha, desde, hasta):
         seat_type=SeatType.ECONOMY,
         sort_by=SortBy.CHEAPEST,
     )
-    res = buscar_todos(filtros)
-    validos = [f for f in res if f.price and aerolinea_ok(f, cfg["aerolineas"]) and escalas_ok(f)]
-    tramo = "ida" if desde == cfg["origen"] else "vuelta"
-    log(f"Tramo {tramo}: {len(res)} resultados, {len(validos)} cumplen filtros")
-    validos.sort(key=lambda f: f.price)
-    return (validos[0] if validos else None), q.url()
+    return buscar_todos(filtros)
 
 
 def candidato_google(f, url, pax):
@@ -333,6 +361,8 @@ def main():
 
     if os.environ.get("JETSMART_DUE") == "1":
         revisar_jetsmart(cfg, st, token, chat)
+
+    precargar_google_web(cfg)
 
     try:
         mejor, todas = mejor_combinacion(cfg, st)

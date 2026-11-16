@@ -59,6 +59,7 @@ jobs:
           ultimo_js=-99999
           while [ $SECONDS -lt $fin ]; do
             inicio=$SECONDS
+            git pull -q --ff-only origin main || true   # usar siempre la última versión del código
             if [ $((SECONDS - ultimo_js)) -ge 3540 ]; then
               export JETSMART_DUE=1; ultimo_js=$SECONDS
             else
