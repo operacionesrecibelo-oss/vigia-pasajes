@@ -385,13 +385,19 @@ def main():
     maximo = f"Máximo: {clp(umbral)} por persona (ida + vuelta)"
     previo = st.get("ultimo_pp")
 
-    # Aviso solo si baja respecto de la última revisión
-    if previo is not None and pp < previo:
-        baja = previo - pp
-        titulo = ("🔥 <b>¡BAJO TU MÁXIMO!</b>" if pp <= umbral else "📉 <b>Bajó el precio</b>")
-        tg_enviar(token, chat, f"{titulo} (−{clp(baja)} por persona)\n{maximo}\n\n{bloque(mejor, cfg, rate)}")
-    elif previo is None and pp <= umbral:
-        tg_enviar(token, chat, f"🔥 <b>¡Ya está bajo tu máximo!</b>\n{maximo}\n\n{bloque(mejor, cfg, rate)}")
+    # Aviso SOLO cuando está en el máximo o por debajo, y cada vez que baje aún más.
+    # Si vuelve a subir sobre el máximo, se reinicia y avisará de nuevo al volver a bajar.
+    if pp <= umbral:
+        avisado = st.get("avisado_pp")
+        if avisado is None:
+            tg_enviar(token, chat, f"🔥 <b>¡PRECIO BAJO TU MÁXIMO!</b>\n{maximo}\n\n{bloque(mejor, cfg, rate)}")
+            st["avisado_pp"] = pp
+        elif pp < avisado:
+            tg_enviar(token, chat, f"🔥 <b>¡Bajó aún más!</b> (−{clp(avisado - pp)} por persona)\n"
+                      f"{maximo}\n\n{bloque(mejor, cfg, rate)}")
+            st["avisado_pp"] = pp
+    else:
+        st["avisado_pp"] = None
 
     st["ultimo_pp"] = pp
     st["minimo_pp"] = min(st.get("minimo_pp", pp), pp)
