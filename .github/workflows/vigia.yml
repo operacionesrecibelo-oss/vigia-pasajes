@@ -1,7 +1,8 @@
 name: Vigia de pasajes
 
-# Una ejecución dura ~5 h 40 min revisando cada 15 minutos y, al terminar,
-# lanza la siguiente (workflow_dispatch). El cron queda como respaldo por si la cadena se corta.
+# Cada ejecución hace UNA revisión en una máquina nueva de GitHub (Google bloquea
+# si se consulta muchas veces desde la misma), espera hasta completar 15 minutos
+# y lanza la siguiente. El cron queda como respaldo por si la cadena se corta.
 on:
   schedule:
     - cron: "*/15 * * * *"
@@ -20,8 +21,11 @@ concurrency:
 jobs:
   revisar:
     runs-on: ubuntu-latest
-    timeout-minutes: 355
+    timeout-minutes: 25
     steps:
+      - name: Marcar inicio
+        run: echo "INICIO=$(date +%s)" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
@@ -47,7 +51,7 @@ jobs:
           key: estado-${{ github.run_id }}
           restore-keys: estado-
 
-      - name: Revisar precios cada 15 minutos
+      - name: Revisar precios
         id: revisar
         shell: bash
         env:
@@ -55,23 +59,9 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          fin=$((SECONDS + 340*60))
-          ultimo_js=-99999
-          while [ $SECONDS -lt $fin ]; do
-            inicio=$SECONDS
-            if [ $((SECONDS - ultimo_js)) -ge 3540 ]; then
-              export JETSMART_DUE=1; ultimo_js=$SECONDS
-            else
-              export JETSMART_DUE=0
-            fi
-            python vigia.py > salida.txt 2>&1 || true
-            cat salida.txt
-            if grep -q FINALIZADO salida.txt; then echo "fin=1" >> "$GITHUB_OUTPUT"; break; fi
-            espera=$((900 - (SECONDS - inicio)))
-            if [ $espera -lt 0 ]; then espera=0; fi
-            if [ $((SECONDS + espera)) -ge $fin ]; then break; fi
-            sleep $espera
-          done
+          python vigia.py > salida.txt 2>&1 || true
+          cat salida.txt
+          if grep -q FINALIZADO salida.txt; then echo "fin=1" >> "$GITHUB_OUTPUT"; fi
 
       - name: Guardar estado
         if: always()
@@ -80,11 +70,14 @@ jobs:
           path: state
           key: estado-${{ github.run_id }}
 
-      - name: Lanzar la siguiente ronda
+      - name: Esperar y lanzar la siguiente revisión
         if: always() && steps.revisar.outputs.fin != '1'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run vigia.yml --repo "${{ github.repository }}" --ref main
+        run: |
+          espera=$(( 870 - ($(date +%s) - $INICIO) ))
+          if [ $espera -gt 0 ]; then sleep $espera; fi
+          gh workflow run vigia.yml --repo "${{ github.repository }}" --ref main
 
       - name: Apagar al terminar el periodo
         if: steps.revisar.outputs.fin == '1'

@@ -97,6 +97,9 @@ def tg_chat_id(token, st):
 
 
 def tg_enviar(token, chat_id, texto):
+    if os.environ.get("DRY_RUN") == "1":
+        log("[prueba] mensaje no enviado: " + texto.splitlines()[0][:60])
+        return
     http_json(
         f"https://api.telegram.org/bot{token}/sendMessage",
         {"chat_id": chat_id, "text": texto, "parse_mode": "HTML",
@@ -167,14 +170,27 @@ def buscar_todos(filtros, intento=1):
     return vuelos
 
 
-def buscar_tramo(cfg, fecha, desde, hasta):
-    # Enlace para abrir la misma búsqueda en Google Flights
+def url_google(cfg, fecha, desde, hasta):
     q = create_query(
         flights=[FlightQuery(date=fecha, from_airport=desde, to_airport=hasta)],
         trip="one-way", seat="economy",
         passengers=Passengers(adults=cfg["adultos"], children=cfg["ninos"]),
         language="es", currency="CLP",
     )
+    return q.url()
+
+
+def buscar_tramo(cfg, fecha, desde, hasta):
+    url = url_google(cfg, fecha, desde, hasta)
+    res = buscar_api(cfg, fecha, desde, hasta)
+    validos = [f for f in res if f.price and aerolinea_ok(f, cfg["aerolineas"]) and escalas_ok(f)]
+    tramo = "ida" if desde == cfg["origen"] else "vuelta"
+    log(f"Tramo {tramo}: {len(res)} resultados, {len(validos)} cumplen filtros")
+    validos.sort(key=lambda f: f.price)
+    return (validos[0] if validos else None), url
+
+
+def buscar_api(cfg, fecha, desde, hasta):
     filtros = FlightSearchFilters(
         passenger_info=PassengerInfo(adults=cfg["adultos"], children=cfg["ninos"]),
         flight_segments=[FlightSegment(
@@ -185,12 +201,7 @@ def buscar_tramo(cfg, fecha, desde, hasta):
         seat_type=SeatType.ECONOMY,
         sort_by=SortBy.CHEAPEST,
     )
-    res = buscar_todos(filtros)
-    validos = [f for f in res if f.price and aerolinea_ok(f, cfg["aerolineas"]) and escalas_ok(f)]
-    tramo = "ida" if desde == cfg["origen"] else "vuelta"
-    log(f"Tramo {tramo}: {len(res)} resultados, {len(validos)} cumplen filtros")
-    validos.sort(key=lambda f: f.price)
-    return (validos[0] if validos else None), q.url()
+    return buscar_todos(filtros)
 
 
 def candidato_google(f, url, pax):
@@ -331,7 +342,12 @@ def main():
         print("FINALIZADO")
         return 0
 
-    if os.environ.get("JETSMART_DUE") == "1":
+    # jetsmart.com: una vez por hora
+    try:
+        edad_js = (datetime.now(TZ) - datetime.fromisoformat(st["jetsmart"]["ts"])).total_seconds()
+    except Exception:
+        edad_js = 1e9
+    if os.environ.get("JETSMART_DUE", "auto") == "1" or (os.environ.get("JETSMART_DUE", "auto") == "auto" and edad_js >= 55 * 60):
         revisar_jetsmart(cfg, st, token, chat)
 
     try:
