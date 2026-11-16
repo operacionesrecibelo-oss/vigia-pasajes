@@ -147,8 +147,8 @@ def buscar_todos(filtros, intento=1):
     if not list(iter_wrb_chunks(r.text)):
         log(f"Google respondió sin datos (HTTP {r.status_code}, {len(r.text)} bytes, "
             f"inicio={r.text[:60]!r}); intento {intento}")
-        if intento < 3:
-            time.sleep(8 * intento)
+        if intento < 2:
+            time.sleep(6)
             return buscar_todos(filtros, intento + 1)
     vuelos, vistos, n_bloques = [], set(), 0
     for inner in iter_wrb_chunks(r.text):
@@ -191,6 +191,14 @@ def buscar_tramo(cfg, fecha, desde, hasta):
 
 
 def buscar_api(cfg, fecha, desde, hasta):
+    try:
+        return _buscar_api(cfg, fecha, desde, hasta)
+    except Exception as e:
+        log(f"Google falló ({type(e).__name__}: {str(e)[:80]})")
+        return []
+
+
+def _buscar_api(cfg, fecha, desde, hasta):
     filtros = FlightSearchFilters(
         passenger_info=PassengerInfo(adults=cfg["adultos"], children=cfg["ninos"]),
         flight_segments=[FlightSegment(
@@ -231,18 +239,20 @@ def candidatos_jetsmart(cfg, st, fecha, desde, hasta):
             "url": jetsmart.url_busqueda(cfg, fecha, desde, hasta), "link_txt": "Ver en jetsmart.com"}
 
 
-def mejor_tramo(cfg, st, fecha, desde, hasta, pax):
-    g, url = buscar_tramo(cfg, fecha, desde, hasta)
+def mejor_tramo(cfg, st, fecha, desde, hasta, pax, consultar=True):
     cands = []
     cache = st.setdefault("g_cache", {})
+    if consultar or fecha not in cache:
+        g, url = buscar_tramo(cfg, fecha, desde, hasta)
+    else:
+        g, url = None, None
     if g:
         c = candidato_google(g, url, pax)
         cache[fecha] = {"ts": datetime.now(TZ).isoformat(), "cand": c}
         cands.append(c)
     elif fecha in cache:
         edad = (datetime.now(TZ) - datetime.fromisoformat(cache[fecha]["ts"])).total_seconds()
-        if edad < 3600:
-            log("Uso el último resultado de Google para este tramo")
+        if edad < 3 * 3600:
             cands.append(cache[fecha]["cand"])
     j = candidatos_jetsmart(cfg, st, fecha, desde, hasta)
     if j:
@@ -251,16 +261,18 @@ def mejor_tramo(cfg, st, fecha, desde, hasta, pax):
 
 
 def mejor_combinacion(cfg, st):
+    """Para no saturar a Google, cada revisión consulta UN tramo (rotando); los demás usan su último resultado."""
     pax = cfg["adultos"] + cfg["ninos"]
-    ida = mejor_tramo(cfg, st, cfg["ida"], cfg["origen"], cfg["destino"], pax)
-    time.sleep(3)
+    fechas = [cfg["ida"]] + cfg["vueltas"]
+    turno = st.get("g_turno", 0) % len(fechas)
+    st["g_turno"] = turno + 1
+    ida = mejor_tramo(cfg, st, cfg["ida"], cfg["origen"], cfg["destino"], pax, consultar=(turno == 0))
     opciones = []
-    for fv in cfg["vueltas"]:
-        vuelta = mejor_tramo(cfg, st, fv, cfg["destino"], cfg["origen"], pax)
+    for k, fv in enumerate(cfg["vueltas"], start=1):
+        vuelta = mejor_tramo(cfg, st, fv, cfg["destino"], cfg["origen"], pax, consultar=(turno == k))
         if ida and vuelta:
             opciones.append({"pp": ida["pp"] + vuelta["pp"], "fecha_vuelta": fv,
                              "ida": ida, "vuelta": vuelta})
-        time.sleep(3)
     return min(opciones, key=lambda o: o["pp"]) if opciones else None, opciones
 
 
