@@ -187,7 +187,18 @@ def buscar_tramo(cfg, fecha, desde, hasta):
     tramo = "ida" if desde == cfg["origen"] else "vuelta"
     log(f"Tramo {tramo}: {len(res)} resultados, {len(validos)} cumplen filtros")
     validos.sort(key=lambda f: f.price)
+    pax = cfg["adultos"] + cfg["ninos"]
+    por_aerolinea = {}
+    for a in cfg["aerolineas"]:
+        clave = a.lower().replace(" ", "")
+        de_a = [f for f in validos if clave in " ".join(nombres_aerolineas(f)).lower().replace(" ", "")]
+        if de_a:
+            por_aerolinea[a] = {"pp": de_a[0].price / pax, "desc": describir(de_a[0])}
+    ULTIMO_POR_AEROLINEA[fecha] = por_aerolinea
     return (validos[0] if validos else None), url
+
+
+ULTIMO_POR_AEROLINEA = {}
 
 
 def buscar_api(cfg, fecha, desde, hasta):
@@ -248,7 +259,8 @@ def mejor_tramo(cfg, st, fecha, desde, hasta, pax, consultar=True):
         g, url = None, None
     if g:
         c = candidato_google(g, url, pax)
-        cache[fecha] = {"ts": datetime.now(TZ).isoformat(), "cand": c}
+        cache[fecha] = {"ts": datetime.now(TZ).isoformat(), "cand": c,
+                        "por_aerolinea": ULTIMO_POR_AEROLINEA.get(fecha, {})}
         cands.append(c)
     elif fecha in cache:
         edad = (datetime.now(TZ) - datetime.fromisoformat(cache[fecha]["ts"])).total_seconds()
@@ -323,6 +335,31 @@ def bloque(o, cfg, rate):
         + tramo_txt("🛫", f"Ida {fecha_txt(cfg['ida'])}", o["ida"]) + "\n\n"
         + tramo_txt("🛬", f"Vuelta {fecha_txt(o['fecha_vuelta'])}", o["vuelta"])
     )
+
+
+def resumen_por_aerolinea(cfg, st):
+    """Mejor ida + mejor vuelta de cada aerolínea, con los últimos datos de Google y de jetsmart.com."""
+    cache = st.get("g_cache", {})
+    lineas = []
+    for a in cfg["aerolineas"]:
+        tramos = []
+        for fecha, desde, hasta in [(cfg["ida"], cfg["origen"], cfg["destino"])] + \
+                [(fv, cfg["destino"], cfg["origen"]) for fv in cfg["vueltas"]]:
+            precios = []
+            g = cache.get(fecha, {}).get("por_aerolinea", {}).get(a)
+            if g:
+                precios.append(g["pp"])
+            if a.lower() == "jetsmart":
+                j = candidatos_jetsmart(cfg, st, fecha, desde, hasta)
+                if j:
+                    precios.append(j["pp"])
+            tramos.append(min(precios) if precios else None)
+        ida, vueltas = tramos[0], [v for v in tramos[1:] if v]
+        if ida and vueltas:
+            lineas.append(f"• {a}: {clp(ida + min(vueltas))}")
+        else:
+            lineas.append(f"• {a}: sin vuelos que cumplan tus filtros (o sin datos recientes)")
+    return "\n".join(lineas)
 
 
 # ---------- principal ----------
@@ -403,9 +440,10 @@ def main():
     st["minimo_pp"] = min(st.get("minimo_pp", pp), pp)
 
     # Resumen diario
-    forzar = not st.get("formato_v2")  # enviar un resumen con el formato nuevo al actualizar
+    forzar = not st.get("formato_v3")  # enviar un resumen con el formato nuevo al actualizar
     if forzar or (ahora.hour >= cfg.get("resumen_hora", 9) and st.get("ultimo_resumen") != hoy):
-        st["formato_v2"] = True
+        st["formato_v3"] = True
+        por_aero = resumen_por_aerolinea(cfg, st)
         otras = "\n".join(
             f"• Vuelta {fecha_txt(o['fecha_vuelta'])}: {clp(o['pp'])} por persona"
             for o in sorted(todas, key=lambda o: o["pp"]))
@@ -414,7 +452,8 @@ def main():
         tg_enviar(token, chat,
                   f"☀️ <b>Resumen diario</b>\n{maximo}\n{estado}\n"
                   f"Mínimo visto: {clp(st['minimo_pp'])} por persona\n\n"
-                  f"{bloque(mejor, cfg, rate)}\n\n<b>Comparación por fecha de vuelta</b>\n{otras}")
+                  f"{bloque(mejor, cfg, rate)}\n\n<b>Comparación por fecha de vuelta</b>\n{otras}\n\n"
+                  f"<b>Mejor precio por aerolínea</b> (ida + vuelta, por persona)\n{por_aero}")
         st["ultimo_resumen"] = hoy
 
     guardar_estado(st)
