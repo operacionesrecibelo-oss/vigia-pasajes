@@ -61,7 +61,13 @@ def buscar(cfg, tramos):
         page = ctx.new_page()
         for fecha, desde, hasta in tramos:
             page.goto(url_busqueda(cfg, fecha, desde, hasta), wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_selector(OPCION, timeout=45000)
+            try:
+                page.wait_for_selector(OPCION, timeout=45000)
+            except Exception:
+                cuerpo = page.evaluate("() => document.body ? document.body.innerText.replace(/\\s+/g, ' ').slice(0, 300) : ''")
+                print(f"[JetSMART] sin resultados. url={page.url.split('?')[0]} title={page.title()[:60]!r} "
+                      f"texto={cuerpo!r}", flush=True)
+                raise
             page.wait_for_timeout(1500)
             # Activar "Ver precios con tasas e impuestos" (el interruptor visible)
             page.evaluate("""() => {
