@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   revisar:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - name: Marcar inicio
@@ -42,6 +42,7 @@ jobs:
           key: playwright-${{ hashFiles('requirements.txt') }}
 
       - name: Instalar navegador
+        continue-on-error: true   # si falla, igual se revisa Google
         run: python -m playwright install --with-deps chromium
 
       - name: Recuperar estado
