@@ -302,8 +302,8 @@ def revisar_jetsmart(cfg, st, token, chat):
         st["js_err"] = st.get("js_err", 0) + 1
         log(f"JetSMART directo falló ({type(e).__name__}); consecutivos: {st['js_err']}")
         if st["js_err"] == 3:
-            tg_enviar(token, chat, "⚠️ jetsmart.com está bloqueando la revisión directa. "
-                      "Sigo revisando con Google Flights y vuelvo a intentar cada hora.")
+            tg_enviar(token, chat, "⚠️ jetsmart.com está bloqueando la revisión directa (pide CAPTCHA). "
+                      "Sigo revisando con Google Flights (que también incluye JetSMART) y reintento cada 6 horas.")
 
 
 def tipo_cambio():
@@ -392,11 +392,14 @@ def main():
         return 0
 
     # jetsmart.com: una vez por hora
+    # Si jetsmart.com está pidiendo CAPTCHA (bloqueo), se reintenta solo cada 6 horas.
     try:
-        edad_js = (datetime.now(TZ) - datetime.fromisoformat(st["jetsmart"]["ts"])).total_seconds()
+        edad_js = (datetime.now(TZ) - datetime.fromisoformat(st["js_intento_ts"])).total_seconds()
     except Exception:
         edad_js = 1e9
-    if os.environ.get("JETSMART_DUE", "auto") == "1" or (os.environ.get("JETSMART_DUE", "auto") == "auto" and edad_js >= 55 * 60):
+    espera_js = 55 * 60 if st.get("js_err", 0) == 0 else 6 * 3600
+    if os.environ.get("JETSMART_DUE", "auto") == "1" or (os.environ.get("JETSMART_DUE", "auto") == "auto" and edad_js >= espera_js):
+        st["js_intento_ts"] = datetime.now(TZ).isoformat()
         revisar_jetsmart(cfg, st, token, chat)
 
     try:
